@@ -8,6 +8,7 @@
 //   0 - silence       -> Mission Planner shows "No GPS"
 //   1 - no fix        -> "No Fix"
 //   3 - 3D fix        -> "3D Fix"
+//   t - pin test: GPIO17 toggles 0 V / 3.3 V every second (check with a multimeter)
 
 #include <Arduino.h>
 
@@ -22,11 +23,12 @@ constexpr uint32_t kUpdatePeriodMs = 200;  // 5 Hz
 constexpr int kLedPin = 2;
 constexpr int kButtonPin = 0;  // BOOT button, active low
 constexpr uint32_t kDebounceMs = 50;
+constexpr uint32_t kPinTestPeriodMs = 1000;
 
-// Simulated position: Kyiv, Maidan Nezalezhnosti
-constexpr double kLatitude = 50.450100;
-constexpr double kLongitude = 30.523400;
-constexpr float kAltitudeM = 179.0f;
+// Simulated position: fields north-east of Lviv, away from the airport
+constexpr double kLatitude = 49.895000;
+constexpr double kLongitude = 24.170000;
+constexpr float kAltitudeM = 300.0f;
 constexpr uint8_t kSatellitesWithFix = 12;
 constexpr uint8_t kSatellitesNoFix = 2;
 constexpr float kHdop = 0.8f;
@@ -36,6 +38,7 @@ enum class Mode : uint8_t { NoGps, NoFix, Fix3D };
 
 Mode mode = Mode::Fix3D;
 bool echoNmea = false;
+bool pinTest = false;
 uint32_t lastUpdateMs = 0;
 
 const char* modeName(Mode m) {
@@ -59,12 +62,35 @@ void printHelp() {
   Serial.println("  1 - No Fix");
   Serial.println("  3 - 3D Fix");
   Serial.println("  v - toggle NMEA echo to this console");
+  Serial.println("  t - toggle pin test (GPIO17 slow 0/3.3 V square wave)");
   Serial.println("  h - help");
   Serial.println("  BOOT button cycles modes");
   Serial.printf("[gps-sim] NMEA out: GPIO%d @ %lu baud, %lu Hz\n", kGpsTxPin,
                 static_cast<unsigned long>(kGpsBaud),
                 static_cast<unsigned long>(1000 / kUpdatePeriodMs));
   Serial.printf("[gps-sim] mode: %s\n", modeName(mode));
+}
+
+// Releases GPIO17 from the UART and drives it slowly so a multimeter can
+// confirm the wire reaches the flight controller's RX pad.
+void togglePinTest() {
+  pinTest = !pinTest;
+  if (pinTest) {
+    Serial2.end();
+    pinMode(kGpsTxPin, OUTPUT);
+  } else {
+    Serial2.begin(kGpsBaud, SERIAL_8N1, kGpsRxPin, kGpsTxPin);
+  }
+  Serial.printf("[gps-sim] pin test: %s\n", pinTest ? "on (NMEA stopped)" : "off");
+}
+
+void updatePinTest() {
+  static bool level = false;
+  const bool next = (millis() / kPinTestPeriodMs) % 2;
+  if (next == level) return;
+  level = next;
+  digitalWrite(kGpsTxPin, level);
+  Serial.printf("[gps-sim] GPIO%d = %s\n", kGpsTxPin, level ? "3.3 V" : "0 V");
 }
 
 void handleConsole() {
@@ -77,6 +103,7 @@ void handleConsole() {
         echoNmea = !echoNmea;
         Serial.printf("[gps-sim] NMEA echo: %s\n", echoNmea ? "on" : "off");
         break;
+      case 't': togglePinTest(); break;
       case 'h': printHelp(); break;
       default: break;
     }
@@ -157,6 +184,11 @@ void loop() {
   handleConsole();
   handleButton();
   updateLed();
+
+  if (pinTest) {
+    updatePinTest();
+    return;
+  }
 
   const uint32_t now = millis();
   if (now - lastUpdateMs >= kUpdatePeriodMs) {
